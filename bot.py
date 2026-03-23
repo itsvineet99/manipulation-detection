@@ -1,11 +1,28 @@
 import os
+from pathlib import Path
 
 import httpx
 from telegram import Update
-from dotenv import load_dotenv
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-load_dotenv()
+
+def load_local_env(path: str = ".env") -> None:
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        os.environ.setdefault(key, value)
+
+
+load_local_env()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000/predict")
 
