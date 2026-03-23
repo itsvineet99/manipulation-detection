@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,71 @@ DATASET_COLUMNS = (
     "severity",
 )
 CLASSIFIER_TARGETS = ("label", "intent_label", "manipulation_type", "domain", "severity")
+TRIVIAL_GREETING_PATTERNS = [
+    re.compile(r"^(hi|hey|hello|hii+|heyy+)(\s+(guys|everyone|all|there))?[!.?]*$", re.IGNORECASE),
+    re.compile(r"^(hi|hey|hello).*(who are you|who'?s this)[!.?]*$", re.IGNORECASE),
+    re.compile(r"^(who are you|who'?s this|what is this)[!.?]*$", re.IGNORECASE),
+]
+SHORT_BENIGN_REQUEST_PATTERNS = [
+    re.compile(r"^(can|could|would)\s+you\b", re.IGNORECASE),
+    re.compile(r"^(please|pls)\b", re.IGNORECASE),
+    re.compile(r"^(let me know|tell me)\b", re.IGNORECASE),
+]
+MANIPULATIVE_CUE_PATTERNS = [
+    re.compile(r"\bif you (really|actually) cared\b", re.IGNORECASE),
+    re.compile(r"\byou owe me\b", re.IGNORECASE),
+    re.compile(r"\beveryone else\b", re.IGNORECASE),
+    re.compile(r"\blast chance\b", re.IGNORECASE),
+    re.compile(r"\bprove yourself\b", re.IGNORECASE),
+    re.compile(r"\bdo not make me\b", re.IGNORECASE),
+    re.compile(r"\bif you do not\b", re.IGNORECASE),
+    re.compile(r"\bor else\b", re.IGNORECASE),
+    re.compile(r"\bi will escalate\b", re.IGNORECASE),
+    re.compile(r"\bcomfortable being blamed\b", re.IGNORECASE),
+    re.compile(r"\bnot on our side\b", re.IGNORECASE),
+    re.compile(r"\bthe least you can do\b", re.IGNORECASE),
+]
+LOW_CONFIDENCE_MANIPULATIVE_THRESHOLD = 0.85
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-zA-Z']+", text.lower())
+
+
+def _has_manipulative_cues(text: str) -> bool:
+    return any(pattern.search(text) for pattern in MANIPULATIVE_CUE_PATTERNS)
+
+
+def _is_trivial_greeting(text: str) -> bool:
+    normalized = text.strip()
+    tokens = _tokenize(normalized)
+    if len(tokens) <= 7 and any(pattern.match(normalized) for pattern in TRIVIAL_GREETING_PATTERNS):
+        return True
+    return False
+
+
+def _is_short_benign_request(text: str) -> bool:
+    normalized = text.strip()
+    tokens = _tokenize(normalized)
+    if len(tokens) > 8:
+        return False
+    if _has_manipulative_cues(normalized):
+        return False
+    return any(pattern.match(normalized) for pattern in SHORT_BENIGN_REQUEST_PATTERNS)
+
+
+def _trivial_message_response() -> dict[str, Any]:
+    return {
+        "label": "not_manipulative",
+        "is_manipulative": False,
+        "intent_label": "small_talk",
+        "intent": "Casual greeting or trivial message",
+        "manipulation_type": "none",
+        "domain": "unknown",
+        "severity": "none",
+        "confidence": None,
+        "intent_confidence": None,
+    }
 
 
 def load_dataset(dataset_path: str | Path) -> pd.DataFrame:
@@ -103,6 +169,9 @@ def predict_text(text: str, artifact: dict[str, Any]) -> dict[str, Any]:
     if not cleaned_text:
         raise ValueError("Input text cannot be empty")
 
+    if _is_trivial_greeting(cleaned_text):
+        return _trivial_message_response()
+
     vectorizer = artifact["vectorizer"]
     vector = vectorizer.transform([cleaned_text])
 
@@ -112,6 +181,18 @@ def predict_text(text: str, artifact: dict[str, Any]) -> dict[str, Any]:
         predicted_value = str(classifier.predict(vector)[0])
         predictions[target] = predicted_value
         confidences[target] = _prediction_confidence(classifier, vector, predicted_value)
+
+    if predictions["label"] == "manipulative":
+        if predictions["manipulation_type"] == "none" or predictions["severity"] == "none":
+            predictions["label"] = "not_manipulative"
+        elif (
+            confidences["label"] is not None
+            and confidences["label"] < LOW_CONFIDENCE_MANIPULATIVE_THRESHOLD
+            and not _has_manipulative_cues(cleaned_text)
+        ):
+            predictions["label"] = "not_manipulative"
+        elif _is_short_benign_request(cleaned_text) and not _has_manipulative_cues(cleaned_text):
+            predictions["label"] = "not_manipulative"
 
     if predictions["label"] == "not_manipulative":
         predictions["manipulation_type"] = "none"
