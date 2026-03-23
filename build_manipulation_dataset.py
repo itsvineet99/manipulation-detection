@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import csv
+import random
+import re
 from pathlib import Path
 
 OUTPUT_PATH = Path("data/manipulation_detection_dataset.csv")
+DEFAULT_ROWS = 10_000
+DEFAULT_SEED = 42
 
 INTENT_METADATA = {
     "request_review": {
@@ -693,69 +698,494 @@ DOMAIN_PREFIXES = {
 }
 
 
-def add_domain_prefix(domain: str, variant_index: int, sentence: str) -> str:
-    prefix = DOMAIN_PREFIXES[domain][variant_index % len(DOMAIN_PREFIXES[domain])]
-    return prefix + sentence[0].lower() + sentence[1:]
+GENERIC_NEUTRAL_PREFIXES = [
+    "",
+    "Quick question: ",
+    "Small request: ",
+    "Just checking in: ",
+    "Before I finalize this, ",
+    "When you get a chance, ",
+    "Hey, ",
+    "Hi, ",
+    "One quick thing: ",
+]
+
+GENERIC_MANIPULATIVE_PREFIXES = [
+    "",
+    "Honestly, ",
+    "Listen, ",
+    "Let us be real here: ",
+    "Seriously, ",
+    "I should not have to say this twice: ",
+]
+
+NEUTRAL_REASON_BRIDGES = [
+    "so {reason}",
+    "because {reason}",
+    "since {reason}",
+    "mainly because {reason}",
+]
+
+NEUTRAL_SECOND_SENTENCES = [
+    "",
+    "If the timing does not work, tell me and we can adjust.",
+    "If anything is unclear, ask and I can explain it.",
+    "No problem if something else is blocking it; I just want to plan around it.",
+    "Let me know if you need anything from me first.",
+    "If you see an issue, flag it before moving ahead.",
+    "I would rather hear about a blocker early than chase it later.",
+]
+
+NEUTRAL_EDGE_SENTENCES = [
+    "",
+    "I know the timing is tight, but it is okay to say no if it will not work.",
+    "I am under a bit of pressure on this too, so a direct answer would help.",
+    "I would rather hear a no than get an unclear answer later.",
+    "I know this is not ideal timing, so just tell me what is realistic.",
+]
+
+NEUTRAL_SIGNOFFS = [
+    "",
+    "Thanks.",
+    "Appreciate it.",
+    "Just keep me posted.",
+    "Either way is fine; I only need clarity.",
+]
+
+NEUTRAL_BODY_TEMPLATES = [
+    "Could you {action} {timeframe} {bridge}",
+    "Please {action} {timeframe}; {reason_cap}",
+    "Can you {action} {timeframe}? {reason_cap}",
+    "I would like you to {action} {timeframe} {bridge}",
+    "If possible, {action} {timeframe}; {reason_cap}",
+    "Would you be able to {action} {timeframe}? {reason_cap}",
+    "It would help if you could {action} {timeframe} {bridge}",
+    "Just let me know if you can {action} {timeframe}; {reason_cap}",
+]
+
+TACTIC_SECOND_SENTENCES = {
+    "guilt": [
+        "It is frustrating when the rest of us end up carrying it instead.",
+        "It is hard not to read your silence as a lack of support.",
+        "Everyone else has already stretched to keep this moving.",
+    ],
+    "urgency": [
+        "There is no point in waiting any longer on this.",
+        "Every extra delay makes it harder to fix cleanly.",
+        "The window to sort this out is closing fast.",
+    ],
+    "shame": [
+        "At this stage, pushing back only makes you look careless.",
+        "Most people would have handled it already by now.",
+        "This should not still need to be explained.",
+    ],
+    "fear": [
+        "If this blows up, people will remember where the delay happened.",
+        "I do not want to see this come back on you later.",
+        "The fallout will be much worse if you leave it hanging.",
+    ],
+    "reciprocity": [
+        "I have shown up when you needed help, so this should not be hard.",
+        "After everything I have done to back you up, this is a small ask.",
+        "I would not be asking if I had not already carried my share for you.",
+    ],
+    "authority_pressure": [
+        "This is not up for debate anymore.",
+        "The decision has already been made, so stop reopening it.",
+        "You do not need more discussion to do what I asked.",
+    ],
+    "social_proof": [
+        "Everybody else has already aligned around it.",
+        "You are the only person still acting like this is uncertain.",
+        "The people who understand the situation are already on board.",
+    ],
+    "blame_shifting": [
+        "If this slips, your choice here will be the obvious reason.",
+        "From here on out, any delay will point back to this moment.",
+        "Do not act surprised later if people connect the dots.",
+    ],
+    "emotional_blackmail": [
+        "Your choice here tells me a lot about how much I matter to you.",
+        "I should not have to question whether you actually support me.",
+        "It is hard not to take this personally when you keep resisting.",
+    ],
+    "false_dichotomy": [
+        "There is not really a neutral position on this.",
+        "Your response will make it obvious where you stand.",
+        "Either you back this or you are choosing not to.",
+    ],
+    "financial_pressure": [
+        "Someone will end up paying for the waste if you do not move on it.",
+        "The extra cost from waiting is not going to disappear on its own.",
+        "If money gets burned here, your name will be attached to it.",
+    ],
+    "threat": [
+        "If I have to escalate this, I will be specific about what happened.",
+        "Do not force me to take this straight to the people above us.",
+        "I am prepared to make this formal if you keep stalling.",
+    ],
+    "flattery_pressure": [
+        "You are the one person people expect to handle this properly.",
+        "I came to you because everyone knows you are the dependable one.",
+        "If anyone can pull this together, it is you, which is why this is on you now.",
+    ],
+    "minimization": [
+        "This is much simpler than you are making it.",
+        "You are turning a straightforward ask into a whole issue.",
+        "It really should not need this much extra discussion.",
+    ],
+    "isolation": [
+        "Bringing in other people will only complicate it.",
+        "Keep it between us unless you want unnecessary interference.",
+        "Other voices will just muddy what should already be clear.",
+    ],
+}
+
+MANIPULATIVE_CLOSERS = [
+    "",
+    "Do not make me chase this again.",
+    "I need an answer, not another delay.",
+    "You know exactly what I am asking.",
+]
+
+GENERIC_CONTEXT_TAILS = [
+    "",
+    "I am trying to avoid rework on the back end.",
+    "I do not want this turning into a bigger issue later.",
+    "It is easier to solve now than after other people get involved.",
+]
+
+SUBTLE_MANIPULATIVE_PHRASES = {
+    "guilt": [
+        "It would really help me if you did not leave me carrying this alone.",
+        "I should not be the only one showing up for this.",
+    ],
+    "urgency": [
+        "We are almost out of room to solve this cleanly.",
+        "This is getting harder to contain the longer it sits.",
+    ],
+    "shame": [
+        "At this point, most people would have dealt with it already.",
+        "This is becoming hard to excuse.",
+    ],
+    "fear": [
+        "I do not want this to become the thing that lands back on you later.",
+        "This is the kind of delay people remember when things go wrong.",
+    ],
+    "reciprocity": [
+        "Given how often I have covered for you, I expected less resistance here.",
+        "After everything I have done on your side of things, this should be simple.",
+    ],
+    "authority_pressure": [
+        "We are past the point where this needs your approval.",
+        "The call has already been made, so just act on it.",
+    ],
+    "social_proof": [
+        "No one else is treating this like an open question anymore.",
+        "Everyone around this has already aligned except you.",
+    ],
+    "blame_shifting": [
+        "If this slips, people are going to connect it to this moment.",
+        "There will be a very obvious reason if this goes sideways now.",
+    ],
+    "emotional_blackmail": [
+        "It would mean a lot if you stopped making me beg for basic support.",
+        "I am learning a lot from how hard you are making this.",
+    ],
+    "false_dichotomy": [
+        "There really is not a neutral version of this choice.",
+        "Your response here is going to say which side of this you are on.",
+    ],
+    "financial_pressure": [
+        "If cost goes up from here, there will be a very clear reason why.",
+        "Waiting is going to turn into money lost for no reason.",
+    ],
+    "threat": [
+        "If this keeps dragging, I will stop handling it informally.",
+        "I am very close to escalating this directly.",
+    ],
+    "flattery_pressure": [
+        "You are the only one I trust not to make a mess of it.",
+        "People count on you for this kind of thing, which is why I came to you.",
+    ],
+    "minimization": [
+        "This is not complicated enough to justify all this back-and-forth.",
+        "You are treating a small ask like a major problem.",
+    ],
+    "isolation": [
+        "The more people you pull into this, the messier it gets.",
+        "Do not turn this into a group discussion unless you want it derailed.",
+    ],
+}
+
+CONTRACTIONS = [
+    (r"\bdo not\b", "don't"),
+    (r"\bwill not\b", "won't"),
+    (r"\bcannot\b", "can't"),
+    (r"\bI am\b", "I'm"),
+    (r"\bit is\b", "it's"),
+    (r"\byou are\b", "you're"),
+    (r"\bwe are\b", "we're"),
+    (r"\bthat is\b", "that's"),
+    (r"\bI would\b", "I'd"),
+    (r"\bI have\b", "I've"),
+]
+
+CASUAL_REPLACEMENTS = [
+    (r"\bPlease\b", "Pls"),
+    (r"\bplease\b", "pls"),
+    (r"\bAppreciate it\.", "thx."),
+    (r"\bThanks\.", "thanks."),
+    (r"\bJust checking in:", "just checking in -"),
+    (r"\bQuick question:", "quick question -"),
+]
 
 
-def build_rows() -> list[dict[str, str | int]]:
-    rows: list[dict[str, str | int]] = []
-    row_id = 1
-    scenario_index = 0
+def capitalize_first(text: str) -> str:
+    return text[:1].upper() + text[1:] if text else text
 
+
+def clean_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    cleaned = cleaned.replace(" ,", ",").replace(" .", ".").replace(" ;", ";").replace(" ?", "?")
+    return cleaned
+
+
+def prepend(prefix: str, sentence: str) -> str:
+    if not prefix:
+        return sentence
+    trimmed = sentence.lstrip()
+    if not trimmed:
+        return prefix.strip()
+
+    stripped_prefix = prefix.rstrip()
+    if stripped_prefix.endswith((",", ":")):
+        if not trimmed.startswith("I "):
+            trimmed = trimmed[0].lower() + trimmed[1:]
+    return prefix + trimmed
+
+
+def join_sentences(parts: list[str]) -> str:
+    return clean_text(" ".join(part for part in parts if part))
+
+
+def build_scenarios() -> list[dict[str, str]]:
+    scenarios: list[dict[str, str]] = []
     for domain, intent_actions in DOMAIN_ACTIONS.items():
         for intent_label, actions in intent_actions.items():
             metadata = INTENT_METADATA[intent_label]
-            for variant_index, action in enumerate(actions):
-                timeframe = metadata["timeframes"][variant_index]
-                neutral_template = NEUTRAL_TEMPLATES[(scenario_index + variant_index) % len(NEUTRAL_TEMPLATES)]
-                neutral_text = neutral_template.format(
-                    action=action,
-                    timeframe=timeframe,
-                    reason=metadata["reason"],
-                )
-                neutral_text = add_domain_prefix(domain, variant_index, neutral_text)
-                rows.append(
+            for action in actions:
+                scenarios.append(
                     {
-                        "id": row_id,
-                        "text": neutral_text,
-                        "label": "not_manipulative",
+                        "domain": domain,
                         "intent_label": intent_label,
                         "intent": metadata["intent"],
-                        "manipulation_type": "none",
-                        "domain": domain,
-                        "severity": "none",
+                        "action": action,
                     }
                 )
-                row_id += 1
+    return scenarios
 
-                tactic = TACTICS[scenario_index % len(TACTICS)]
-                manipulative_template = MANIPULATIVE_TEMPLATES[tactic][scenario_index % 2]
-                manipulative_text = manipulative_template.format(action=action, timeframe=timeframe)
-                manipulative_text = add_domain_prefix(domain, variant_index, manipulative_text)
+
+def shuffled_repeat(items: list, total: int, rng: random.Random) -> list:
+    sequence = []
+    while len(sequence) < total:
+        batch = list(items)
+        rng.shuffle(batch)
+        sequence.extend(batch)
+    return sequence[:total]
+
+
+def choose_timeframe(intent_label: str, rng: random.Random) -> str:
+    if intent_label == "delay_until_ready":
+        return ""
+
+    base = list(INTENT_METADATA[intent_label]["timeframes"])
+    flexible = {
+        "request_review": ["before I send the final version", "before it goes out"],
+        "confirm_attendance": ["as soon as you know", "before I lock anything in"],
+        "share_update": ["once you have the latest version", "before people start asking"],
+        "follow_process": ["from here on out", "for this round"],
+        "share_materials": ["when it is ready", "before the next step starts"],
+        "raise_concern": ["while we still have room to change it", "before this gets locked in"],
+        "ask_for_help": ["if you have a little bandwidth today", "when you have a minute"],
+        "request_privacy": ["until we agree on what is public", "until it is okay to share"],
+        "discuss_budget": ["before money is committed", "while we can still change course"],
+        "delay_until_ready": ["for now", "a little longer", "for the moment", "before anything else changes"],
+        "safety_check": ["as soon as you notice it", "right away if it changes"],
+        "give_feedback": ["before I finalize it", "when you read through it"],
+    }
+    return rng.choice(base + flexible[intent_label])
+
+
+def choose_domain_prefix(domain: str, rng: random.Random) -> str:
+    options = DOMAIN_PREFIXES[domain] + ["", "", ""]
+    return rng.choice(options)
+
+
+def render_action(intent_label: str, action: str) -> str:
+    if intent_label == "request_privacy" and action.startswith("not share "):
+        remainder = action[len("not share ") :]
+        return f"keep {remainder} private"
+    return action
+
+
+def apply_surface_variation(text: str, label: str, rng: random.Random) -> str:
+    updated = text
+
+    if rng.random() < 0.45:
+        for pattern, target in CONTRACTIONS:
+            if re.search(pattern, updated, flags=re.IGNORECASE) and rng.random() < 0.55:
+                updated = re.sub(pattern, target, updated, count=1, flags=re.IGNORECASE)
+
+    if rng.random() < 0.18:
+        for pattern, target in CASUAL_REPLACEMENTS:
+            if re.search(pattern, updated, flags=re.IGNORECASE):
+                updated = re.sub(pattern, target, updated, count=1, flags=re.IGNORECASE)
+                break
+
+    if rng.random() < 0.12:
+        updated = updated.replace("right away", "ASAP", 1)
+
+    if rng.random() < 0.10:
+        updated = updated.replace("because", "bc", 1)
+
+    if rng.random() < 0.08 and updated.endswith("."):
+        updated = updated[:-1]
+
+    if rng.random() < 0.06:
+        updated = updated.replace("...", ".", 1)
+        updated = updated + (" ok?" if label == "manipulative" else " just let me know.")
+
+    if rng.random() < 0.04:
+        updated = updated.replace("you are", "ur", 1)
+
+    return clean_text(updated)
+
+
+def compose_neutral_text(scenario: dict[str, str], rng: random.Random) -> str:
+    intent_label = scenario["intent_label"]
+    reason = INTENT_METADATA[intent_label]["reason"]
+    action = render_action(intent_label, scenario["action"])
+    bridge = rng.choice(NEUTRAL_REASON_BRIDGES).format(reason=reason)
+    body = rng.choice(NEUTRAL_BODY_TEMPLATES).format(
+        action=action,
+        timeframe=choose_timeframe(intent_label, rng),
+        bridge=bridge,
+        reason_cap=capitalize_first(reason),
+    )
+    body = prepend(choose_domain_prefix(scenario["domain"], rng), body)
+    body = prepend(rng.choice(GENERIC_NEUTRAL_PREFIXES), body)
+
+    second_sentence = rng.choice(NEUTRAL_SECOND_SENTENCES)
+    if rng.random() < 0.35:
+        second_sentence = join_sentences([second_sentence, rng.choice(GENERIC_CONTEXT_TAILS)])
+    if rng.random() < 0.22:
+        second_sentence = join_sentences([second_sentence, rng.choice(NEUTRAL_EDGE_SENTENCES)])
+
+    text = join_sentences([body, second_sentence, rng.choice(NEUTRAL_SIGNOFFS)])
+    return apply_surface_variation(text, "not_manipulative", rng)
+
+
+def compose_manipulative_text(scenario: dict[str, str], tactic: str, rng: random.Random) -> str:
+    intent_label = scenario["intent_label"]
+    template = rng.choice(MANIPULATIVE_TEMPLATES[tactic])
+    action = render_action(intent_label, scenario["action"])
+    body = template.format(action=action, timeframe=choose_timeframe(intent_label, rng))
+    body = prepend(choose_domain_prefix(scenario["domain"], rng), body)
+    body = prepend(rng.choice(GENERIC_MANIPULATIVE_PREFIXES), body)
+
+    follow_up = ""
+    if rng.random() < 0.85:
+        follow_up = rng.choice(TACTIC_SECOND_SENTENCES[tactic])
+    if rng.random() < 0.30:
+        follow_up = join_sentences([follow_up, rng.choice(SUBTLE_MANIPULATIVE_PHRASES[tactic])])
+    if rng.random() < 0.25:
+        follow_up = join_sentences([follow_up, rng.choice(MANIPULATIVE_CLOSERS)])
+
+    text = join_sentences([body, follow_up])
+    return apply_surface_variation(text, "manipulative", rng)
+
+
+def build_rows(total_rows: int = DEFAULT_ROWS, seed: int = DEFAULT_SEED) -> list[dict[str, str | int]]:
+    if total_rows < 2:
+        raise ValueError("total_rows must be at least 2")
+
+    rng = random.Random(seed)
+    scenarios = build_scenarios()
+    target_neutral = total_rows // 2
+    target_manipulative = total_rows - target_neutral
+
+    neutral_scenarios = shuffled_repeat(scenarios, target_neutral, rng)
+    manipulative_scenarios = shuffled_repeat(scenarios, target_manipulative, rng)
+    manipulative_tactics = shuffled_repeat(TACTICS, target_manipulative, rng)
+
+    rows: list[dict[str, str | int]] = []
+    seen_texts: set[str] = set()
+    row_id = 1
+
+    def add_row(
+        *,
+        label: str,
+        scenario: dict[str, str],
+        tactic: str,
+        severity: str,
+        row_seed_base: int,
+    ) -> None:
+        nonlocal row_id
+        for attempt in range(200):
+            local_rng = random.Random(row_seed_base + attempt * 9973)
+            if label == "not_manipulative":
+                text = compose_neutral_text(scenario, local_rng)
+            else:
+                text = compose_manipulative_text(scenario, tactic, local_rng)
+
+            if text not in seen_texts:
+                seen_texts.add(text)
                 rows.append(
                     {
                         "id": row_id,
-                        "text": manipulative_text,
-                        "label": "manipulative",
-                        "intent_label": intent_label,
-                        "intent": metadata["intent"],
+                        "text": text,
+                        "label": label,
+                        "intent_label": scenario["intent_label"],
+                        "intent": scenario["intent"],
                         "manipulation_type": tactic,
-                        "domain": domain,
-                        "severity": TACTIC_SEVERITY[tactic],
+                        "domain": scenario["domain"],
+                        "severity": severity,
                     }
                 )
                 row_id += 1
-                scenario_index += 1
+                return
+
+        raise RuntimeError("Could not generate a unique text after many attempts")
+
+    for index, scenario in enumerate(neutral_scenarios):
+        add_row(
+            label="not_manipulative",
+            scenario=scenario,
+            tactic="none",
+            severity="none",
+            row_seed_base=seed * 10_000 + index,
+        )
+
+    for index, (scenario, tactic) in enumerate(zip(manipulative_scenarios, manipulative_tactics, strict=False)):
+        add_row(
+            label="manipulative",
+            scenario=scenario,
+            tactic=tactic,
+            severity=TACTIC_SEVERITY[tactic],
+            row_seed_base=seed * 100_000 + index,
+        )
+
+    rng.shuffle(rows)
+    for row_id, row in enumerate(rows, start=1):
+        row["id"] = row_id
 
     return rows
 
 
-def main() -> None:
-    rows = build_rows()
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    with OUTPUT_PATH.open("w", newline="", encoding="utf-8") as file:
+def write_rows(rows: list[dict[str, str | int]], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
             file,
             fieldnames=[
@@ -772,8 +1202,20 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rows", type=int, default=DEFAULT_ROWS, help="Number of rows to generate.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for reproducible generation.")
+    parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Output CSV path.")
+    args = parser.parse_args()
+
+    rows = build_rows(total_rows=args.rows, seed=args.seed)
+    write_rows(rows, args.output)
+
     print(f"rows={len(rows)}")
-    print(f"output_path={OUTPUT_PATH}")
+    print(f"seed={args.seed}")
+    print(f"output_path={args.output}")
 
 
 if __name__ == "__main__":
