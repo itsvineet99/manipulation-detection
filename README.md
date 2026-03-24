@@ -181,6 +181,29 @@ Run evaluation:
 
 Run the Telegram bot:
 
-```bash
-TELEGRAM_BOT_TOKEN=YOUR_TOKEN BACKEND_URL=http://localhost:8000/predict .venv/bin/python bot.py
-```
+
+## Deployment to Render
+
+This project is configured for deployment on [Render](https://render.com) using the `render.yaml` blueprint.
+
+### Services Defined
+
+1.  **manipulation-api**: A Web Service running the FastAPI inference server.
+2.  **manipulation-bot**: A Background Worker running the Telegram bot.
+
+### Steps to Deploy
+
+1.  Connect your GitHub repository to Render.
+2.  Render will automatically detect the `render.yaml` file.
+3.  Go to the **manipulation-bot** service settings and add the following Environment Variable:
+    - `TELEGRAM_BOT_TOKEN`: Your API token from BotFather.
+4.  The `BACKEND_URL` for the bot is automatically configured to point to the internal URL of the `manipulation-api` service.
+
+### Environment Variables
+
+| Service | Variable | Description | Default |
+| --- | --- | --- | --- |
+| `manipulation-api` | `PORT` | The port the server listens on. | `8000` |
+| `manipulation-api` | `MANIPULATION_MODEL_PATH` | Path to the model file. | `manipulation_model.joblib` |
+| `manipulation-bot` | `TELEGRAM_BOT_TOKEN` | **Required.** Your Telegram Bot API token. | (none) |
+| `manipulation-bot` | `BACKEND_URL` | The URL of the inference API. | Internal Render URL |

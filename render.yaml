@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: manipulation-api
+    env: python
+    buildCommand: pip install .
+    startCommand: python manipulation_inference.py --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: MANIPULATION_MODEL_PATH
+        value: manipulation_model.joblib
+
+  - type: worker
+    name: manipulation-bot
+    env: python
+    buildCommand: pip install .
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: BACKEND_URL
+        fromService:
+          name: manipulation-api
+          type: web
+          property: host
